@@ -121,7 +121,24 @@ kubectl create namespace argocd
 kubectl apply -n argocd --server-side --force-conflicts \
   -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
 kubectl -n argocd rollout status deployment/argocd-server
+```
 
+Argo CD lit le dépôt en SSH avec une **deploy key en lecture seule**, propre à ce dépôt et révocable depuis GitHub. La clé privée est générée en RAM, chargée dans un Secret Kubernetes puis effacée du disque :
+
+```bash
+umask 077; K=$(mktemp -d /dev/shm/argocd-key.XXXXXX)
+ssh-keygen -q -t ed25519 -N "" -C "argocd deploy key (read-only)" -f "$K/key"
+kubectl -n argocd create secret generic repo-devsecops-platform \
+  --from-literal=type=git \
+  --from-literal=url=git@github.com:CubicPotato/devsecops-platform.git \
+  --from-file=sshPrivateKey="$K/key"
+kubectl -n argocd label secret repo-devsecops-platform argocd.argoproj.io/secret-type=repository
+cat "$K/key.pub"; shred -u "$K/key"; rm -rf "$K"
+```
+
+Colle la clé publique affichée dans **Settings → Deploy keys → Add deploy key**, sans cocher *Allow write access*. Puis :
+
+```bash
 # Argo CD suit désormais le dossier k8s/ de la branche main
 kubectl apply -f https://raw.githubusercontent.com/CubicPotato/devsecops-platform/main/argocd/application.yaml
 ```

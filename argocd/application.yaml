@@ -8,7 +8,10 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/CubicPotato/devsecops-platform.git # dépôt public : aucun identifiant nécessaire
+    # Lecture en SSH avec une deploy key en lecture seule (Secret argocd/repo-devsecops-platform, voir README).
+    # Le dépôt est public : la clé n'est pas indispensable, elle limite l'accès au strict nécessaire et
+    # permet de repasser le dépôt en privé sans rien changer côté cluster.
+    repoURL: git@github.com:CubicPotato/devsecops-platform.git
     targetRevision: main
     path: k8s
   destination:
