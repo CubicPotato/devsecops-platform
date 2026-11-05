@@ -4,7 +4,7 @@ metadata:
   name: demo-api
   namespace: devsecops-demo
 spec:
-  type: LoadBalancer # AKS crée une IP publique (pratique pour la démo)
+  type: LoadBalancer # k3s (ServiceLB) expose le port 80 sur l'IP du serveur ; nécessite k3s installé sans Traefik
   selector:
     app: demo-api
   ports:

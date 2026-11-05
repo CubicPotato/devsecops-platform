@@ -24,7 +24,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: api
-          image: ghcr.io/placeholder/demo-api:placeholder # remplacé par le pipeline (tag = SHA du commit)
+          image: ghcr.io/placeholder/demo-api:placeholder # mis à jour par le pipeline (tag = SHA du commit), déployé par Argo CD
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

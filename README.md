@@ -1,6 +1,6 @@
 # Plateforme DevSecOps sécurisée
 
-Une chaîne CI/CD **GitHub Actions** qui teste, analyse et déploie automatiquement une API Python conteneurisée sur **Kubernetes (Azure AKS)**. Si une faille grave est détectée, le déploiement est **bloqué**.
+Une chaîne CI/CD **GitHub Actions** qui teste, analyse et déploie automatiquement une API Python conteneurisée sur **Kubernetes (k3s auto-hébergé)**, en **GitOps** avec Argo CD. Si une faille grave est détectée, le déploiement est **bloqué**.
 
 ## Architecture du pipeline
 
@@ -19,7 +19,10 @@ Une chaîne CI/CD **GitHub Actions** qui teste, analyse et déploie automatiquem
     Push vers GHCR (tag = SHA du commit)
             │
             ▼
-    Déploiement AKS (connexion Azure par OIDC, sans mot de passe)
+    Commit du nouveau tag dans k8s/deployment.yaml
+            │
+            ▼  (le cluster tire les changements, GitHub n'a aucun accès au cluster)
+    Argo CD (sur le serveur k3s) synchronise le cluster avec Git
 ```
 
 Tous les résultats sont publiés au format SARIF dans l'onglet **Security → Code scanning** du dépôt.
@@ -29,12 +32,12 @@ Tous les résultats sont publiés au format SARIF dans l'onglet **Security → C
 | Domaine | Mesure |
 |---|---|
 | Pipeline | Permissions minimales par job (`permissions: {}` par défaut), actions épinglées par **SHA** (et non par tag), Dependabot pour les mettre à jour |
-| Secrets | Aucun secret longue durée : `GITHUB_TOKEN` éphémère pour GHCR, **OIDC** pour Azure ; Gitleaks sur tout l'historique |
+| Secrets | Aucun secret longue durée : `GITHUB_TOKEN` éphémère pour GHCR et le commit de déploiement, **aucun accès au cluster stocké dans GitHub** ; Gitleaks sur tout l'historique |
 | Code | Semgrep (SAST), validation des entrées via Pydantic |
 | Dépendances | Trivy fs + Dependabot, versions épinglées |
 | Image | Multi-stage, base `slim`, utilisateur non-root, mises à jour OS, scan Trivy, SBOM |
-| Kubernetes | Pod Security « restricted », `readOnlyRootFilesystem`, capabilities supprimées, pas de token de service account, limites CPU/RAM, NetworkPolicy |
-| Déploiement | Environnement GitHub `production` (validation manuelle possible) |
+| Kubernetes | Pod Security « restricted », `readOnlyRootFilesystem`, capabilities supprimées, pas de token de service account, limites CPU/RAM, NetworkPolicy (appliquée par k3s) |
+| Déploiement | **GitOps** avec Argo CD : modèle *pull*, aucun port entrant à ouvrir, `selfHeal` annule toute modification manuelle du cluster ; environnement GitHub `production` (validation manuelle possible) |
 
 ## Structure
 
@@ -42,7 +45,8 @@ Tous les résultats sont publiés au format SARIF dans l'onglet **Security → C
 app/                     API FastAPI
 tests/                   tests pytest
 Dockerfile               image durcie
-k8s/                     manifests Kubernetes
+k8s/                     manifests Kubernetes (synchronisés par Argo CD)
+argocd/                  application Argo CD
 .github/workflows/       pipeline DevSecOps
 .github/dependabot.yml   mises à jour automatiques
 ```
@@ -67,86 +71,84 @@ trivy fs --scanners vuln,misconfig,secret .
 trivy image demo-api
 ```
 
-## Mise en place sur Azure (une seule fois)
+## Mise en place du serveur (une seule fois)
 
-Prérequis : [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installé, puis `az login`.
+Prérequis : un serveur **Debian** accessible en SSH, avec au moins 2 vCPU et 4 Go de RAM.
 
-### 1. Créer le cluster AKS
+### 1. Installer k3s
 
-```bash
-RG=rg-devsecops
-CLUSTER=aks-devsecops
-LOCATION=francecentral
-
-az group create -n $RG -l $LOCATION
-
-az aks create -g $RG -n $CLUSTER \
-  --tier free \
-  --node-count 1 \
-  --node-vm-size Standard_B2s \
-  --network-plugin azure \
-  --network-policy azure \
-  --generate-ssh-keys
-```
-
-> Si la taille `Standard_B2s` n'est pas disponible dans ta région ou ton abonnement, liste les tailles possibles avec `az vm list-skus -l $LOCATION -o table`.
-
-### 2. Créer l'identité pour GitHub (OIDC, sans mot de passe)
-
-Remplace `TON_COMPTE/TON_DEPOT` par ton dépôt GitHub.
+Sur le serveur :
 
 ```bash
-REPO=TON_COMPTE/TON_DEPOT
+# Traefik est désactivé : le service demo-api utilise directement le port 80
+curl -sfL https://get.k3s.io | sh -s - --disable traefik
 
-APP_ID=$(az ad app create --display-name gh-devsecops-deployer --query appId -o tsv)
-az ad sp create --id $APP_ID
+# Utiliser kubectl sans sudo
+mkdir -p ~/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+sudo chown "$USER": ~/.kube/config
+chmod 600 ~/.kube/config
+echo 'export KUBECONFIG=~/.kube/config' >> ~/.bashrc
+export KUBECONFIG=~/.kube/config
 
-# GitHub pourra s'authentifier uniquement depuis l'environnement "production" de ce dépôt
-az ad app federated-credential create --id $APP_ID --parameters "{
-  \"name\": \"github-production\",
-  \"issuer\": \"https://token.actions.githubusercontent.com\",
-  \"subject\": \"repo:${REPO}:environment:production\",
-  \"audiences\": [\"api://AzureADTokenExchange\"]
-}"
-
-# Droit minimal : récupérer les accès à CE cluster uniquement
-AKS_ID=$(az aks show -g $RG -n $CLUSTER --query id -o tsv)
-az role assignment create --assignee $APP_ID \
-  --role "Azure Kubernetes Service Cluster User Role" \
-  --scope $AKS_ID
-
-# Valeurs à copier dans GitHub
-echo "AZURE_CLIENT_ID=$APP_ID"
-echo "AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)"
-echo "AZURE_SUBSCRIPTION_ID=$(az account show --query id -o tsv)"
+kubectl get nodes   # le nœud doit être "Ready"
 ```
 
-### 3. Configurer le dépôt GitHub
+> Si un pare-feu `ufw` est actif : `sudo ufw allow 80/tcp`, puis autorise le réseau interne de k3s avec `sudo ufw allow from 10.42.0.0/16` et `sudo ufw allow from 10.43.0.0/16`.
+
+### 2. Configurer le dépôt GitHub
 
 1. **Settings → Environments → New environment** : `production`. Tu peux y ajouter *Required reviewers* pour valider chaque déploiement à la main.
-2. **Settings → Secrets and variables → Actions → Variables** : ajoute `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AKS_RESOURCE_GROUP` (= `rg-devsecops`) et `AKS_CLUSTER_NAME` (= `aks-devsecops`).
-   Ce sont des *variables* et non des *secrets* : avec OIDC, ces identifiants ne permettent rien sans le jeton signé par GitHub.
-3. **Settings → Code security** : active *Dependabot alerts* et *Code scanning*. Sur un dépôt **privé**, l'onglet Security demande GitHub Advanced Security ; le plus simple est de rendre le dépôt **public**.
+2. **Settings → Code security** : active *Dependabot alerts* et *Code scanning*. Sur un dépôt **privé**, l'onglet Security demande GitHub Advanced Security, et Argo CD aurait besoin d'identifiants pour lire le dépôt : le plus simple est de rendre le dépôt **public**.
+3. Si tu protèges la branche `main`, le job de déploiement doit pouvoir y pousser son commit (sinon il échoue).
 
-### 4. Premier déploiement
+### 3. Premier passage du pipeline
 
-Pousse sur `main`. Après le premier push, l'image GHCR est **privée** : AKS ne pourra pas la télécharger (`ImagePullBackOff`). Va dans **ton profil → Packages → le package → Package settings → Change visibility → Public**, puis relance le workflow.
+Pousse sur `main`. Le pipeline construit et analyse l'image, la pousse sur GHCR, puis commite son tag dans `k8s/deployment.yaml` (pense à faire `git pull` ensuite).
 
-Récupérer l'IP publique :
+L'image GHCR est **privée** par défaut : le cluster ne pourra pas la télécharger (`ImagePullBackOff`). Va dans **ton profil → Packages → le package → Package settings → Change visibility → Public**.
 
-```bash
-az aks get-credentials -g $RG -n $CLUSTER
-kubectl -n devsecops-demo get svc demo-api
-curl http://<EXTERNAL-IP>/health
-```
+### 4. Installer Argo CD
 
-### Limiter les coûts
+Sur le serveur :
 
 ```bash
-az aks stop  -g $RG -n $CLUSTER   # arrête les nœuds quand tu ne travailles pas
-az aks start -g $RG -n $CLUSTER
-az group delete -n $RG            # tout supprimer à la fin du projet
+# Version figée (la dernière publiée au moment de l'installation)
+ARGOCD_VERSION=$(curl -s https://api.github.com/repos/argoproj/argo-cd/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+echo "$ARGOCD_VERSION"
+
+kubectl create namespace argocd
+kubectl apply -n argocd --server-side --force-conflicts \
+  -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
+kubectl -n argocd rollout status deployment/argocd-server
+
+# Argo CD suit désormais le dossier k8s/ de la branche main
+kubectl apply -f https://raw.githubusercontent.com/CubicPotato/devsecops-platform/main/argocd/application.yaml
 ```
+
+Vérifier :
+
+```bash
+kubectl -n argocd get applications        # demo-api : Synced / Healthy
+kubectl -n devsecops-demo get pods,svc
+curl http://<IP_DU_SERVEUR>/health
+```
+
+L'application est accessible depuis ton réseau local sur `http://<IP_DU_SERVEUR>/`.
+
+### Interface Argo CD (pratique pour la démo)
+
+Depuis ton PC, ouvre un tunnel SSH puis lance le port-forward dans cette session :
+
+```bash
+ssh -L 8080:localhost:8080 <utilisateur>@<IP_DU_SERVEUR>
+
+# dans la session SSH
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
+kubectl -n argocd port-forward svc/argocd-server 8080:443
+```
+
+Ouvre `https://localhost:8080` (certificat auto-signé), utilisateur `admin`, mot de passe affiché ci-dessus. Change-le ensuite dans *User Info*.
 
 ## Démo pour la soutenance : le pipeline bloque une faille
 
@@ -166,5 +168,6 @@ puis ouvre une Pull Request : **Semgrep** signale l'injection de commande et le 
 
 - Signature de l'image avec **Cosign** et vérification à l'admission (Kyverno)
 - **DAST** avec OWASP ZAP sur l'application déployée
-- Secrets applicatifs dans **Azure Key Vault** (Secrets Store CSI Driver)
+- Secrets applicatifs chiffrés dans Git avec **Sealed Secrets** (ou External Secrets)
+- Accès depuis Internet sans ouvrir de port, via **Cloudflare Tunnel**
 - Ingress HTTPS (cert-manager + Let's Encrypt)

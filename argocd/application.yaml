@@ -1,0 +1,20 @@
+# Application Argo CD : synchronise le dossier k8s/ de la branche main avec le cluster.
+# À appliquer une seule fois, après l'installation d'Argo CD (voir README).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-api
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/CubicPotato/devsecops-platform.git # dépôt public : aucun identifiant nécessaire
+    targetRevision: main
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: devsecops-demo
+  syncPolicy:
+    automated:
+      prune: true # supprime du cluster ce qui a été retiré de Git
+      selfHeal: true # annule toute modification faite à la main dans le cluster

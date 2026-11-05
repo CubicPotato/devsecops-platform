@@ -1,4 +1,4 @@
-# Pipeline DevSecOps : tests -> secrets -> SAST -> SCA -> build + scan image -> push -> deploy AKS
+# Pipeline DevSecOps : tests -> secrets -> SAST -> SCA -> build + scan image -> push -> deploy GitOps (Argo CD sur k3s)
 #
 # Toutes les actions tierces sont épinglées par SHA de commit (et non par tag) :
 # un tag peut être déplacé par un attaquant (cf. compromission de trivy-action en 2026),
@@ -205,41 +205,34 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: docker push "${{ steps.vars.outputs.image }}"
 
-  # ---------------------------------------------------------------- Déploiement
+  # ---------------------------------------------------------------- Déploiement (GitOps)
+  # Le pipeline ne se connecte jamais au cluster : il écrit le nouveau tag d'image dans Git.
+  # Argo CD, installé dans le cluster k3s, surveille le dépôt et applique le changement lui-même
+  # (modèle "pull") : aucun accès au cluster n'est stocké dans GitHub, aucun port n'est ouvert.
   deploy:
-    name: Déploiement sur AKS
+    name: Déploiement GitOps (mise à jour du manifest)
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production # permet d'exiger une validation manuelle dans les settings
     permissions:
-      contents: read
-      id-token: write # OIDC : GitHub prouve son identité à Azure, aucun mot de passe stocké
+      contents: write # uniquement pour commiter le nouveau tag d'image
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          persist-credentials: true # nécessaire au git push, limité à ce job
 
-      - name: Connexion Azure (OIDC, sans secret longue durée)
-        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
-
-      - name: Contexte AKS
-        uses: azure/aks-set-context@883bdc8d8d1d0fd87e66cc4ba6f0b618f9eb5281 # v5.0.1
-        with:
-          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
-
-      - name: Appliquer les manifests
+      - name: Écrire le nouveau tag dans k8s/deployment.yaml
         env:
           IMAGE: ${{ needs.build.outputs.image }}
         run: |
-          sed -i "s|ghcr.io/placeholder/demo-api:placeholder|${IMAGE}|" k8s/deployment.yaml
-          kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/
-          kubectl -n devsecops-demo rollout status deployment/demo-api --timeout=180s
+          sed -i -E "s|^(\s+image: )\S+|\1${IMAGE}|" k8s/deployment.yaml
+          if git diff --quiet; then
+            echo "Image déjà à jour, rien à commiter"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "deploy: ${IMAGE} [skip ci]"
+          # Échoue si main a avancé entre-temps : le run plus récent déploiera sa propre image.
+          git push
