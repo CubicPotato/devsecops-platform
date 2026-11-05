@@ -1,0 +1,16 @@
+# N'autorise que le trafic entrant vers le port 8000 de l'API.
+# Nécessite un cluster AKS créé avec une network policy (--network-policy azure ou cilium).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: demo-api-ingress
+  namespace: devsecops-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: demo-api
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8000
+          protocol: TCP

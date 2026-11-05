@@ -1,0 +1,245 @@
+# Pipeline DevSecOps : tests -> secrets -> SAST -> SCA -> build + scan image -> push -> deploy AKS
+#
+# Toutes les actions tierces sont épinglées par SHA de commit (et non par tag) :
+# un tag peut être déplacé par un attaquant (cf. compromission de trivy-action en 2026),
+# un SHA non. Dependabot (voir .github/dependabot.yml) les met à jour.
+
+name: DevSecOps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Principe du moindre privilège : aucun droit par défaut, chaque job demande les siens.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------------------------------------------------------------- Tests
+  tests:
+    name: Tests unitaires
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -v
+
+  # ---------------------------------------------------------------- Secrets
+  secrets-scan:
+    name: Détection de secrets (Gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tout l'historique : un secret supprimé reste dans git !
+          persist-credentials: false
+      - name: Gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git /repo --redact --verbose --exit-code 1
+
+  # ---------------------------------------------------------------- SAST
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # pour publier le SARIF dans l'onglet Security
+    container:
+      image: semgrep/semgrep:1.183.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Semgrep scan
+        run: |
+          semgrep scan \
+            --config p/python \
+            --config p/owasp-top-ten \
+            --config p/dockerfile \
+            --config p/github-actions \
+            --metrics off \
+            --sarif --output semgrep.sarif \
+            --error
+      - name: Publier les résultats dans GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  # ---------------------------------------------------------------- SCA + IaC
+  sca:
+    name: Dépendances & config (Trivy fs)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Trivy fs (rapport SARIF complet)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          format: sarif
+          output: trivy-fs.sarif
+      - name: Publier les résultats dans GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+      - name: Security gate (HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+          skip-setup-trivy: true
+
+  # ---------------------------------------------------------------- Build + scan image
+  build:
+    name: Build, scan & push de l'image
+    runs-on: ubuntu-latest
+    needs: [tests, secrets-scan, sast, sca] # le security gate : rien ne se build si un scan échoue
+    permissions:
+      contents: read
+      packages: write # push vers GHCR
+      security-events: write
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Nom de l'image (en minuscules, exigé par les registres)
+        id: vars
+        run: echo "image=${REGISTRY}/${GITHUB_REPOSITORY,,}:${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build (chargé localement, pas encore poussé)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ steps.vars.outputs.image }}
+          build-args: APP_VERSION=${{ github.sha }}
+
+      - name: Trivy image (rapport SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.vars.outputs.image }}
+          format: sarif
+          output: trivy-image.sarif
+      - name: Publier les résultats dans GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Security gate image (HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.vars.outputs.image }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - name: SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.vars.outputs.image }}
+          format: cyclonedx
+          output: sbom.cdx.json
+          skip-setup-trivy: true
+      - name: Archiver le SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
+      - name: Login GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # jeton éphémère, aucun secret à créer
+
+      - name: Push de l'image (uniquement sur main, après tous les scans)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker push "${{ steps.vars.outputs.image }}"
+
+  # ---------------------------------------------------------------- Déploiement
+  deploy:
+    name: Déploiement sur AKS
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production # permet d'exiger une validation manuelle dans les settings
+    permissions:
+      contents: read
+      id-token: write # OIDC : GitHub prouve son identité à Azure, aucun mot de passe stocké
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Connexion Azure (OIDC, sans secret longue durée)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+
+      - name: Contexte AKS
+        uses: azure/aks-set-context@883bdc8d8d1d0fd87e66cc4ba6f0b618f9eb5281 # v5.0.1
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+
+      - name: Appliquer les manifests
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          sed -i "s|ghcr.io/placeholder/demo-api:placeholder|${IMAGE}|" k8s/deployment.yaml
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/
+          kubectl -n devsecops-demo rollout status deployment/demo-api --timeout=180s
