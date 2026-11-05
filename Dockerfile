@@ -16,7 +16,13 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 FROM python:3.13-slim
 
 # Utilisateur non-root (bonne pratique, vérifiée par Trivy misconfig)
-RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app
+# + suppression de pip (et de sa copie ensurepip) : inutile à l'exécution, les dépendances
+# sont installées dans l'étape builder. pip embarque ses propres dépendances (urllib3,
+# msgpack, setuptools...) qui remontent comme CVE au scan d'image : moins de paquets,
+# moins de surface d'attaque.
+RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app \
+    && python -m pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3.13/ensurepip
 
 WORKDIR /app
 COPY --from=builder /install /usr/local
