@@ -1,15 +1,23 @@
 # Met à jour automatiquement les dépendances (et les SHA des actions épinglées)
+# cooldown : attend 7 jours avant de proposer une version fraîchement publiée,
+# le temps qu'un éventuel paquet malveillant (supply chain) soit détecté et retiré.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7

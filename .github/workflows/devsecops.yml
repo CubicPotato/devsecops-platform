@@ -63,6 +63,7 @@ jobs:
     permissions:
       contents: read
       security-events: write # pour publier le SARIF dans l'onglet Security
+      actions: read # requis par upload-sarif (lecture des infos du run)
     container:
       image: semgrep/semgrep:1.183.0
     steps:
@@ -93,6 +94,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      actions: read # requis par upload-sarif (lecture des infos du run)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -132,6 +134,7 @@ jobs:
       contents: read
       packages: write # push vers GHCR
       security-events: write
+      actions: read # requis par upload-sarif (lecture des infos du run)
     outputs:
       image: ${{ steps.vars.outputs.image }}
     steps:
