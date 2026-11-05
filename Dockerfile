@@ -5,7 +5,7 @@
 
 # ---- Étape 1 : installation des dépendances ----
 # nosemgrep: dockerfile-source-not-pinned
-FROM python:3.13-slim AS builder
+FROM python:3.15-slim AS builder
 
 WORKDIR /build
 COPY requirements.txt .
@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ---- Étape 2 : image finale minimale ----
 # nosemgrep: dockerfile-source-not-pinned
-FROM python:3.13-slim
+FROM python:3.15-slim
 
 # Utilisateur non-root (bonne pratique, vérifiée par Trivy misconfig)
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app
