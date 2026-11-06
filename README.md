@@ -2,6 +2,11 @@
 
 [![DevSecOps](https://github.com/CubicPotato/devsecops-platform/actions/workflows/devsecops.yml/badge.svg)](https://github.com/CubicPotato/devsecops-platform/actions/workflows/devsecops.yml)
 
+
+<p align="center">
+  <img src="docs/images/Grafana_dashboard_Nodes.png" alt="Dashboard Grafana" width="700">
+</p>
+
 Chaîne CI/CD complète qui **teste, analyse et déploie** automatiquement une API Python conteneurisée sur un cluster **Kubernetes (k3s) auto-hébergé**, en **GitOps** avec **Argo CD**.
 
 Chaque `git push` passe par quatre contrôles de sécurité (secrets, code, dépendances, configuration) puis par un scan de l'image. **Si une faille grave est détectée, rien n'est déployé.** Quand tout est vert, le cluster se met à jour tout seul en quelques minutes, sans que GitHub n'ait jamais accès au serveur.
@@ -17,6 +22,8 @@ Chaque `git push` passe par quatre contrôles de sécurité (secrets, code, dép
 | **Infrastructure** | Serveur Debian personnel, k3s mono-nœud, Argo CD, pare-feu ufw + CrowdSec |
 | **Observabilité** | Prometheus + Grafana (cluster, nœud, Argo CD, attaques bloquées par CrowdSec), déployés eux aussi en GitOps |
 | **Stack** | Python · FastAPI · Docker · GitHub Actions · GHCR · Kubernetes (k3s) · Argo CD · Prometheus · Grafana |
+
+
 
 ## Architecture
 
