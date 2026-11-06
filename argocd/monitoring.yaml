@@ -1,0 +1,42 @@
+# Application Argo CD : stack de monitoring (Prometheus, Grafana, Alertmanager, node-exporter, kube-state-metrics).
+# Deux sources : le chart Helm officiel, à version figée, et ce dépôt pour les valeurs et les manifests complémentaires.
+# À appliquer une seule fois, après avoir créé le Secret grafana-admin (voir README).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: 92.21.1 # version figée : une mise à jour = un commit relu
+      helm:
+        releaseName: kps
+        valueFiles:
+          - $values/monitoring/values.yaml
+    - repoURL: git@github.com:CubicPotato/devsecops-platform.git
+      targetRevision: main
+      ref: values # fournit monitoring/values.yaml à la source Helm
+      path: monitoring/manifests # et déploie le namespace + les ServiceMonitor
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true # les CRD de Prometheus Operator dépassent la taille d'annotation de kubectl apply
+      - SkipDryRunOnMissingResource=true # les ServiceMonitor sont créés dans la même synchro que leur CRD
+  # Le caBundle des webhooks est injecté après coup par un job du chart : ne pas le considérer comme une dérive.
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle

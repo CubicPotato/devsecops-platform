@@ -1,0 +1,24 @@
+# Fait collecter par Prometheus les métriques des composants d'Argo CD
+# (synchronisations, état des applications, appels Git, API).
+# Tous exposent un port nommé "metrics" ; les NetworkPolicies d'Argo CD l'autorisent depuis les autres namespaces.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: argocd
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames: [argocd]
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - argocd-metrics # application-controller
+          - argocd-server-metrics
+          - argocd-repo-server
+          - argocd-applicationset-controller
+          - argocd-notifications-controller-metrics
+  endpoints:
+    - port: metrics
+      interval: 30s

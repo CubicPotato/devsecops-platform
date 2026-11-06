@@ -1,0 +1,146 @@
+# Valeurs du chart kube-prometheus-stack (version figée dans argocd/monitoring.yaml),
+# adaptées à un cluster k3s mono-nœud.
+# Déployé par Argo CD : toute modification passe par Git.
+
+crds:
+  enabled: true
+
+# --- Composants embarqués dans le binaire k3s ---------------------------------
+# k3s regroupe controller-manager, scheduler, proxy et etcd/sqlite dans un seul
+# processus, sans pods dédiés : les surveiller créerait des cibles en erreur et
+# de fausses alertes "...Down".
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+
+# --- Prometheus ---------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    # Prend en compte tous les ServiceMonitor / PodMonitor / règles du cluster,
+    # pas seulement ceux créés par ce chart (ex. monitoring/manifests/).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+    retention: 15d
+    retentionSize: 8GB
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 10Gi
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 2Gi
+
+    # CrowdSec tourne sur l'hôte (hors Kubernetes) et expose ses métriques sur le port 6060.
+    # L'adresse du nœud est découverte via l'API Kubernetes : aucune IP en dur dans Git.
+    # Le port n'est joignable que depuis les pods (ufw : 10.42.0.0/16), pas depuis le réseau local.
+    additionalScrapeConfigs:
+      - job_name: crowdsec
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_node_address_InternalIP]
+            target_label: __address__
+            replacement: $1:6060
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: machine
+
+# --- Alertmanager -------------------------------------------------------------
+# Aucun destinataire configuré : les alertes sont visibles dans Grafana / Alertmanager.
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 128Mi
+
+# --- Grafana ------------------------------------------------------------------
+grafana:
+  # Identifiants dans un Secret créé à la main sur le serveur (jamais dans Git),
+  # au lieu du mot de passe par défaut du chart.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+
+  # Service en ClusterIP (défaut du chart) : accès uniquement par tunnel SSH.
+  grafana.ini:
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+    users:
+      allow_sign_up: false
+
+  defaultDashboardsTimezone: browser
+
+  # Pod de test "helm test" : inutile avec Argo CD, qui le déploierait comme une ressource normale.
+  testFramework:
+    enabled: false
+
+  # Dashboards supplémentaires, téléchargés au démarrage depuis des URL figées
+  # (tag de version ou SHA de commit, jamais une branche).
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: argocd
+          orgId: 1
+          folder: Argo CD
+          type: file
+          disableDeletion: true
+          editable: false
+          options:
+            path: /var/lib/grafana/dashboards/argocd
+        - name: crowdsec
+          orgId: 1
+          folder: CrowdSec
+          type: file
+          disableDeletion: true
+          editable: false
+          options:
+            path: /var/lib/grafana/dashboards/crowdsec
+
+  dashboards:
+    argocd:
+      argocd:
+        url: https://raw.githubusercontent.com/argoproj/argo-cd/v3.6.1/examples/dashboard.json
+    crowdsec:
+      crowdsec-overview:
+        url: https://raw.githubusercontent.com/crowdsecurity/grafana-dashboards/0d34f686930aab1f11562bdf664ffad60c567e39/dashboards_v5/Crowdsec%20Overview.json
+        datasource:
+          - name: DS_PROMETHEUS
+            value: prometheus
+      crowdsec-insight:
+        url: https://raw.githubusercontent.com/crowdsecurity/grafana-dashboards/0d34f686930aab1f11562bdf664ffad60c567e39/dashboards_v5/Crowdsec%20Insight.json
+        datasource:
+          - name: DS_PROMETHEUS
+            value: prometheus
+      crowdsec-details:
+        url: https://raw.githubusercontent.com/crowdsecurity/grafana-dashboards/0d34f686930aab1f11562bdf664ffad60c567e39/dashboards_v5/Crowdsec%20Details%20per%20Machine.json
+        datasource:
+          - name: DS_PROMETHEUS
+            value: prometheus

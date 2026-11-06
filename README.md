@@ -15,7 +15,8 @@ Chaque `git push` passe par quatre contrôles de sécurité (secrets, code, dép
 | **Ce que fait le projet** | Du commit au déploiement en production, sans intervention manuelle, avec un *security gate* qui bloque les failles |
 | **Sécurité** | Shift-left (Gitleaks, Semgrep, Trivy), image durcie, Pod Security `restricted`, GitOps en modèle *pull*, moindre privilège partout |
 | **Infrastructure** | Serveur Debian personnel, k3s mono-nœud, Argo CD, pare-feu ufw + CrowdSec |
-| **Stack** | Python · FastAPI · Docker · GitHub Actions · GHCR · Kubernetes (k3s) · Argo CD |
+| **Observabilité** | Prometheus + Grafana (cluster, nœud, Argo CD, attaques bloquées par CrowdSec), déployés eux aussi en GitOps |
+| **Stack** | Python · FastAPI · Docker · GitHub Actions · GHCR · Kubernetes (k3s) · Argo CD · Prometheus · Grafana |
 
 ## Architecture
 
@@ -39,6 +40,9 @@ flowchart LR
 
     subgraph srv [Serveur auto-hébergé · k3s]
         argo[Argo CD] -->|applique k8s/| app[demo-api ×2]
+        argo -->|applique monitoring/| mon[Prometheus + Grafana]
+        app -.->|état des pods| mon
+        cs[CrowdSec · hôte] -.->|métriques| mon
     end
 
     argo -.->|pull Git en SSH<br/>deploy key lecture seule| gh
@@ -83,7 +87,8 @@ Tous les résultats sont publiés au format SARIF dans l'onglet **Security → C
 | Image | Multi-stage, base `slim`, utilisateur non-root, `pip` retiré de l'image finale, scan Trivy, SBOM |
 | Kubernetes | Pod Security `restricted`, `readOnlyRootFilesystem`, toutes les capabilities supprimées, pas de token de service account, limites CPU/RAM, NetworkPolicy |
 | Déploiement | GitOps avec Argo CD (modèle *pull*), `selfHeal` qui annule toute modification manuelle du cluster, deploy key **en lecture seule** limitée à ce dépôt, environnement GitHub `production` (validation manuelle possible) |
-| Serveur | Pare-feu ufw en refus par défaut, **API Kubernetes (6443) et Argo CD non exposés** (accès par tunnel SSH), CrowdSec avec bouncer nftables, SSH par clé uniquement |
+| Serveur | Pare-feu ufw en refus par défaut, **API Kubernetes (6443), Argo CD et Grafana non exposés** (accès par tunnel SSH), CrowdSec avec bouncer nftables, SSH par clé uniquement |
+| Observabilité | Métriques du nœud, des pods, d'Argo CD et de CrowdSec dans Grafana ; chart Helm et dashboards à **version figée** (tag ou SHA) ; identifiants Grafana dans un Secret créé hors de Git |
 
 ## Choix techniques
 
@@ -93,6 +98,7 @@ Tous les résultats sont publiés au format SARIF dans l'onglet **Security → C
 - **Security gate sur HIGH/CRITICAL avec `ignore-unfixed`.** Le pipeline bloque les failles graves pour lesquelles un correctif existe. Bloquer sur des CVE sans correctif empêcherait tout déploiement sans rien rendre plus sûr ; elles restent visibles dans l'onglet Security.
 - **Deploy key sur un dépôt public.** Argo CD pourrait lire le dépôt sans identifiant. La deploy key (SSH, lecture seule, limitée à ce dépôt, révocable depuis GitHub) applique quand même le principe d'un accès dédié et minimal, et permet de repasser le dépôt en privé sans rien changer côté cluster.
 - **k3s sans Traefik.** Pour une seule application, le ServiceLB intégré à k3s expose directement le port 80 : un Ingress n'apporterait que de la complexité (il reste une piste d'amélioration avec HTTPS).
+- **Le monitoring aussi en GitOps.** La stack Prometheus/Grafana est une Application Argo CD comme les autres : le chart Helm officiel à version figée, et les valeurs dans ce dépôt. Une montée de version est un commit relu, pas une commande lancée à la main sur le serveur.
 
 ## Structure
 
@@ -101,7 +107,8 @@ app/                     API FastAPI
 tests/                   tests pytest
 Dockerfile               image durcie (multi-stage, non-root)
 k8s/                     manifests Kubernetes, synchronisés par Argo CD
-argocd/                  définition de l'application Argo CD
+argocd/                  applications Argo CD (demo-api, monitoring)
+monitoring/              valeurs du chart kube-prometheus-stack + manifests complémentaires
 .github/workflows/       pipeline DevSecOps
 .github/dependabot.yml   mises à jour automatiques
 ```
@@ -257,6 +264,36 @@ Le changer dès la première connexion (*User Info → Update password*), puis s
 ```bash
 kubectl -n argocd delete secret argocd-initial-admin-secret
 ```
+
+### 7. Monitoring (Prometheus + Grafana)
+
+Créer le namespace et le Secret des identifiants Grafana. Le mot de passe est saisi sans écho et ne passe ni par Git ni par l'historique du shell :
+
+```bash
+kubectl create namespace monitoring
+read -rsp "Mot de passe Grafana : " P; echo
+printf %s "$P" | kubectl -n monitoring create secret generic grafana-admin \
+  --from-literal=admin-user=admin --from-file=admin-password=/dev/stdin
+unset P
+```
+
+Pour les dashboards CrowdSec, les métriques de CrowdSec doivent être joignables depuis les pods. En root, dans `/etc/crowdsec/config.yaml`, passer `prometheus.listen_addr` de `127.0.0.1` à `0.0.0.0`, puis `systemctl restart crowdsec`. Le port 6060 reste fermé au réseau local par ufw (seuls les réseaux de k3s sont autorisés).
+
+Puis créer l'application :
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/CubicPotato/devsecops-platform/main/argocd/monitoring.yaml
+kubectl -n argocd get applications        # monitoring : Synced / Healthy
+```
+
+Accès à Grafana par tunnel SSH, puis `http://localhost:3000` :
+
+```bash
+ssh -t -L 3000:localhost:3000 <utilisateur>@<IP_DU_SERVEUR> \
+  'kubectl --kubeconfig ~/.kube/config -n monitoring port-forward svc/kps-grafana 3000:80'
+```
+
+Dashboards utiles : *Kubernetes / Compute Resources / Cluster*, *Node Exporter / Nodes*, *Argo CD* et *CrowdSec Overview*.
 
 ### Désinstaller
 

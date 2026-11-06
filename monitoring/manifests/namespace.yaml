@@ -1,0 +1,12 @@
+# Namespace du monitoring.
+# node-exporter lit les métriques de l'hôte (hostNetwork, hostPID, montage de /proc et /sys) :
+# il ne peut pas respecter le profil "restricted". Ce namespace est donc en "privileged",
+# contrairement à devsecops-demo. Il ne contient que les composants du chart kube-prometheus-stack.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
