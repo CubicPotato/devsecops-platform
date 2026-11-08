@@ -15,7 +15,6 @@ Chaque `git push` passe par quatre contrôles de sécurité (secrets, code, dép
 
 ## En bref
 
-| | |
 |---|---|
 | **Ce que fait le projet** | Du commit au déploiement en production, sans intervention manuelle, avec un *security gate* qui bloque les failles |
 | **Sécurité** | Shift-left (Gitleaks, Semgrep, Trivy), image durcie, Pod Security `restricted`, GitOps en modèle *pull*, moindre privilège partout |
