@@ -20,7 +20,7 @@ Chaque `git push` passe par quatre contrôles de sécurité (secrets, code, dép
 | **Sécurité** | Shift-left (Gitleaks, Semgrep, Trivy), image durcie, Pod Security `restricted`, GitOps en modèle *pull*, moindre privilège partout |
 | **Infrastructure** | Serveur Debian personnel, k3s mono-nœud, Argo CD, pare-feu ufw + CrowdSec |
 | **Observabilité** | Prometheus + Grafana (cluster, nœud, Argo CD, attaques bloquées par CrowdSec), déployés eux aussi en GitOps |
-| **Stack** | Python · FastAPI · Docker · GitHub Actions · GHCR · Kubernetes (k3s) · Argo CD · Prometheus · Grafana |
+| **Stack** | Python, FastAPI, Docker, GitHub Actions, GHCR, Kubernetes (k3s), Argo CD, Prometheus, Grafana |
 
 
 
