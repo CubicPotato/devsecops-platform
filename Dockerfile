@@ -20,7 +20,12 @@ FROM python:3.13-slim
 # sont installées dans l'étape builder. pip embarque ses propres dépendances (urllib3,
 # msgpack, setuptools...) qui remontent comme CVE au scan d'image : moins de paquets,
 # moins de surface d'attaque.
-RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app \
+# + apt-get upgrade : applique les correctifs Debian publiés avant que l'image python ne soit
+# reconstruite (sinon la security gate Trivy bloque sur des CVE déjà corrigées).
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app \
     && python -m pip uninstall -y pip \
     && rm -rf /usr/local/lib/python3.13/ensurepip
 
